@@ -1,0 +1,10 @@
+# Convenience file: installs both backend and frontend dependencies
+# in one shot for local development.
+#
+#   pip install -r requirements.txt
+#
+# For deployment, use backend/requirements.txt and frontend/requirements.txt
+# separately (Render and Streamlit Cloud each install from their own folder).
+
+-r backend/requirements.txt
+-r frontend/requirements.txt
