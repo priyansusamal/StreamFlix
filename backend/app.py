@@ -1,7 +1,7 @@
 
 """
 StreamFlix Backend API
-Flask + Flask-SQLAlchemy + Werkzeug + TMDB posters.
+Flask + Flask-SQLAlchemy + Werkzeug + TMDB posters + Reviews
 
 Run locally:
     pip install -r requirements.txt
@@ -20,10 +20,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# Load environment variables from backend/.env
-load_dotenv(
-    os.path.join(os.path.dirname(__file__), ".env")
-)
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # ---------------------------------------------------------------------------
 # App & database configuration
@@ -32,10 +29,7 @@ load_dotenv(
 app = Flask(__name__)
 CORS(app)
 
-database_url = os.environ.get(
-    "DATABASE_URL",
-    "sqlite:///streamflix.db"
-)
+database_url = os.environ.get("DATABASE_URL", "sqlite:///streamflix.db")
 
 if database_url.startswith("postgres://"):
     database_url = database_url.replace(
@@ -57,9 +51,7 @@ class User(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
-    email = db.Column(
-        db.String(120), unique=True, nullable=False, index=True
-    )
+    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
     password = db.Column(db.String(255), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -114,10 +106,54 @@ class Watchlist(db.Model):
     movie = db.relationship("Movie")
 
     __table_args__ = (
+        db.UniqueConstraint("user_id", "movie_id", name="uq_user_movie"),
+    )
+
+
+class Review(db.Model):
+    __tablename__ = "reviews"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id"), nullable=False
+    )
+    movie_id = db.Column(
+        db.Integer, db.ForeignKey("movies.id"), nullable=False
+    )
+    rating = db.Column(db.Integer, nullable=False)
+    review_text = db.Column(db.Text, nullable=False)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
+
+    user = db.relationship("User")
+    movie = db.relationship("Movie")
+
+    __table_args__ = (
         db.UniqueConstraint(
-            "user_id", "movie_id", name="uq_user_movie"
+            "user_id", "movie_id", name="uq_user_movie_review"
+        ),
+        db.CheckConstraint(
+            "rating >= 1 AND rating <= 5",
+            name="check_review_rating"
         ),
     )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "user_name": self.user.name,
+            "movie_id": self.movie_id,
+            "rating": self.rating,
+            "review_text": self.review_text,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat()
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -125,8 +161,6 @@ class Watchlist(db.Model):
 # ---------------------------------------------------------------------------
 
 def migrate_movie_table():
-    """Add poster_url to an existing movie table without deleting data."""
-
     inspector = inspect(db.engine)
 
     if "movies" not in inspector.get_table_names():
@@ -140,9 +174,7 @@ def migrate_movie_table():
     if "poster_url" not in columns:
         with db.engine.begin() as connection:
             connection.execute(
-                text(
-                    "ALTER TABLE movies ADD COLUMN poster_url TEXT"
-                )
+                text("ALTER TABLE movies ADD COLUMN poster_url TEXT")
             )
 
 
@@ -237,11 +269,6 @@ MOVIE_DATA = [
 
 
 def seed_movies():
-    """
-    Add catalog entries and update existing titles.
-    Existing movie IDs and watchlist relationships are preserved.
-    """
-
     for title, genre, year, description in MOVIE_DATA:
         movie = Movie.query.filter_by(title=title).first()
 
@@ -267,8 +294,6 @@ def seed_movies():
 # ---------------------------------------------------------------------------
 
 def fetch_tmdb_poster(title, year=None):
-    """Search TMDB for a movie or TV show and return its poster URL."""
-
     api_key = os.getenv("TMDB_API_KEY")
 
     if not api_key:
@@ -277,7 +302,6 @@ def fetch_tmdb_poster(title, year=None):
 
     base_url = "https://api.themoviedb.org/3/search/"
 
-    # Try movie search first, then TV search.
     for media_type in ["movie", "tv"]:
         url = base_url + media_type
 
@@ -293,24 +317,15 @@ def fetch_tmdb_poster(title, year=None):
                 params["first_air_date_year"] = year
 
         try:
-            response = requests.get(
-                url,
-                params=params,
-                timeout=15
-            )
+            response = requests.get(url, params=params, timeout=15)
             response.raise_for_status()
             results = response.json().get("results", [])
 
-            # If year-specific search fails, retry without year.
             if not results and year:
                 params.pop("year", None)
                 params.pop("first_air_date_year", None)
 
-                response = requests.get(
-                    url,
-                    params=params,
-                    timeout=15
-                )
+                response = requests.get(url, params=params, timeout=15)
                 response.raise_for_status()
                 results = response.json().get("results", [])
 
@@ -328,6 +343,8 @@ def fetch_tmdb_poster(title, year=None):
 
     print(f"No poster found for: {title}")
     return None
+
+
 # ---------------------------------------------------------------------------
 # Initialize database
 # ---------------------------------------------------------------------------
@@ -336,6 +353,14 @@ with app.app_context():
     db.create_all()
     migrate_movie_table()
     seed_movies()
+
+
+# ---------------------------------------------------------------------------
+# Generic error helper
+# ---------------------------------------------------------------------------
+
+def error(message, status=400):
+    return jsonify({"error": message}), status
 
 
 # ---------------------------------------------------------------------------
@@ -372,9 +397,7 @@ def register():
         return error("Password must be at least 8 characters long.")
 
     if User.query.filter_by(email=email).first():
-        return error(
-            "An account with that email already exists.", 409
-        )
+        return error("An account with that email already exists.", 409)
 
     user = User(
         name=name,
@@ -387,9 +410,7 @@ def register():
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        return error(
-            "An account with that email already exists.", 409
-        )
+        return error("An account with that email already exists.", 409)
 
     return jsonify({
         "message": "Account created successfully.",
@@ -424,13 +445,6 @@ def login():
 
 @app.route("/api/movies", methods=["GET"])
 def get_movies():
-    """
-    Optional query parameters:
-      ?q=<text>          Search title or genre
-      ?genre=<genre>     Filter by genre
-      ?q=<text>&genre=<genre>
-    """
-
     q = (request.args.get("q") or "").strip()
     genre = (request.args.get("genre") or "").strip()
 
@@ -457,8 +471,6 @@ def get_movies():
 
 @app.route("/api/genres", methods=["GET"])
 def get_genres():
-    """Return distinct genres in the catalog."""
-
     genres = [
         row[0]
         for row in db.session.query(Movie.genre)
@@ -472,11 +484,6 @@ def get_genres():
 
 @app.route("/api/movies/refresh-posters", methods=["POST"])
 def refresh_posters():
-    """
-    Fetch and save posters for movies without a poster URL.
-    Existing valid poster URLs are left unchanged.
-    """
-
     if not os.getenv("TMDB_API_KEY"):
         return error(
             "TMDB_API_KEY is missing from the backend .env file.",
@@ -484,12 +491,12 @@ def refresh_posters():
         )
 
     movies = Movie.query.filter(
-    db.or_(
-        Movie.poster_url.is_(None),
-        Movie.poster_url == "",
-        Movie.poster_url.like("%placehold%"),
-        Movie.poster_url.like("%placeholder%")
-    )
+        db.or_(
+            Movie.poster_url.is_(None),
+            Movie.poster_url == "",
+            Movie.poster_url.like("%placehold%"),
+            Movie.poster_url.like("%placeholder%")
+        )
     ).all()
 
     updated = 0
@@ -497,10 +504,7 @@ def refresh_posters():
 
     try:
         for movie in movies:
-            poster_url = fetch_tmdb_poster(
-                movie.title,
-                movie.year
-            )
+            poster_url = fetch_tmdb_poster(movie.title, movie.year)
 
             if poster_url:
                 movie.poster_url = poster_url
@@ -568,13 +572,9 @@ def add_to_watchlist():
     ).first()
 
     if existing:
-        return error(
-            "That title is already in your watchlist.", 409
-        )
+        return error("That title is already in your watchlist.", 409)
 
-    db.session.add(
-        Watchlist(user_id=user_id, movie_id=movie_id)
-    )
+    db.session.add(Watchlist(user_id=user_id, movie_id=movie_id))
     db.session.commit()
 
     return jsonify({"message": "Added to watchlist."}), 201
@@ -600,12 +600,173 @@ def remove_from_watchlist(user_id, movie_id):
 
 
 # ---------------------------------------------------------------------------
-# Generic error handlers
+# Ratings & Reviews endpoints
 # ---------------------------------------------------------------------------
 
-def error(message, status=400):
-    return jsonify({"error": message}), status
+@app.route("/api/movies/<int:movie_id>/reviews", methods=["GET"])
+def get_movie_reviews(movie_id):
+    movie = db.session.get(Movie, movie_id)
 
+    if not movie:
+        return error("Movie not found.", 404)
+
+    reviews = (
+        Review.query
+        .filter_by(movie_id=movie_id)
+        .order_by(Review.created_at.desc())
+        .all()
+    )
+
+    average_rating = (
+        db.session.query(db.func.avg(Review.rating))
+        .filter_by(movie_id=movie_id)
+        .scalar()
+    )
+
+    return jsonify({
+        "movie_id": movie_id,
+        "average_rating": round(float(average_rating), 1)
+        if average_rating is not None else 0,
+        "total_reviews": len(reviews),
+        "reviews": [review.to_dict() for review in reviews]
+    })
+
+
+@app.route("/api/reviews", methods=["POST"])
+def create_review():
+    data = request.get_json(silent=True) or {}
+
+    user_id = data.get("user_id")
+    movie_id = data.get("movie_id")
+    rating = data.get("rating")
+    review_text = (data.get("review_text") or "").strip()
+
+    if not user_id or not movie_id:
+        return error("user_id and movie_id are required.")
+
+    if not db.session.get(User, user_id):
+        return error("User not found.", 404)
+
+    if not db.session.get(Movie, movie_id):
+        return error("Movie not found.", 404)
+
+    if (
+        not isinstance(rating, int)
+        or isinstance(rating, bool)
+        or rating < 1
+        or rating > 5
+    ):
+        return error("Rating must be an integer from 1 to 5.")
+
+    if not review_text:
+        return error("Review text is required.")
+
+    existing = Review.query.filter_by(
+        user_id=user_id,
+        movie_id=movie_id
+    ).first()
+
+    if existing:
+        return error(
+            "You have already reviewed this movie. Please edit your review.",
+            409
+        )
+
+    review = Review(
+        user_id=user_id,
+        movie_id=movie_id,
+        rating=rating,
+        review_text=review_text
+    )
+
+    db.session.add(review)
+
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return error("You have already reviewed this movie.", 409)
+
+    return jsonify({
+        "message": "Review submitted successfully.",
+        "review": review.to_dict()
+    }), 201
+
+
+@app.route("/api/reviews/<int:review_id>", methods=["PUT"])
+def update_review(review_id):
+    data = request.get_json(silent=True) or {}
+
+    user_id = data.get("user_id")
+    review = db.session.get(Review, review_id)
+
+    if not review:
+        return error("Review not found.", 404)
+
+    if not user_id:
+        return error("user_id is required.")
+
+    if review.user_id != user_id:
+        return error("You can only edit your own review.", 403)
+
+    rating = data.get("rating")
+    review_text = data.get("review_text")
+
+    if rating is not None:
+        if (
+            not isinstance(rating, int)
+            or isinstance(rating, bool)
+            or rating < 1
+            or rating > 5
+        ):
+            return error("Rating must be an integer from 1 to 5.")
+
+        review.rating = rating
+
+    if review_text is not None:
+        review_text = review_text.strip()
+
+        if not review_text:
+            return error("Review text cannot be empty.")
+
+        review.review_text = review_text
+
+    review.updated_at = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({
+        "message": "Review updated successfully.",
+        "review": review.to_dict()
+    })
+
+
+@app.route("/api/reviews/<int:review_id>", methods=["DELETE"])
+def delete_review(review_id):
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id")
+
+    review = db.session.get(Review, review_id)
+
+    if not review:
+        return error("Review not found.", 404)
+
+    if not user_id:
+        return error("user_id is required.")
+
+    if review.user_id != user_id:
+        return error("You can only delete your own review.", 403)
+
+    db.session.delete(review)
+    db.session.commit()
+
+    return jsonify({
+        "message": "Review deleted successfully."
+    })
+
+
+# ---------------------------------------------------------------------------
+# Generic error handlers
+# ---------------------------------------------------------------------------
 
 @app.errorhandler(404)
 def not_found(_e):

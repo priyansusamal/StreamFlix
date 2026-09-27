@@ -1,14 +1,13 @@
 
 """
-StreamFlix frontend (Streamlit)
+StreamFlix Frontend
+Streamlit + Flask API
 
 Run locally:
-    pip install -r requirements.txt
+    cd frontend
     streamlit run app.py
 
-The backend API URL is read from Streamlit secrets (BACKEND_URL) or the
-BACKEND_URL environment variable, falling back to http://localhost:5000
-for local development.
+Backend URL is read from Streamlit secrets or environment variables.
 """
 
 import os
@@ -148,6 +147,39 @@ def inject_css():
             padding: 10px 0 20px 0;
         }}
 
+        .sf-review {{
+            background: rgba(20, 18, 32, 0.75);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 12px;
+            padding: 18px;
+            margin-bottom: 14px;
+        }}
+
+        .sf-review-name {{
+            color: #ffffff;
+            font-size: 1rem;
+            font-weight: 700;
+        }}
+
+        .sf-review-date {{
+            color: #88889b;
+            font-size: 0.78rem;
+        }}
+
+        .sf-review-text {{
+            color: #d0d0dc;
+            line-height: 1.6;
+            margin-top: 12px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }}
+
+        .sf-rating {{
+            color: #ffc107;
+            font-size: 1.2rem;
+            font-weight: 700;
+        }}
+
         hr {{
             border-color: rgba(255,255,255,0.08);
         }}
@@ -174,6 +206,9 @@ if "user" not in st.session_state:
 
 if "watchlist_ids" not in st.session_state:
     st.session_state.watchlist_ids = set()
+
+if "selected_movie" not in st.session_state:
+    st.session_state.selected_movie = None
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +265,18 @@ def fetch_genres():
     return []
 
 
+def fetch_reviews(movie_id):
+    return api_call(
+        "GET",
+        f"/api/movies/{movie_id}/reviews"
+    )
+
+
+def star_text(rating):
+    rating = int(rating)
+    return "★" * rating + "☆" * (5 - rating)
+
+
 # ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
@@ -254,6 +301,7 @@ def render_header():
             if st.button("Log Out", use_container_width=True):
                 st.session_state.user = None
                 st.session_state.watchlist_ids = set()
+                st.session_state.selected_movie = None
                 st.rerun()
 
     st.write("")
@@ -280,14 +328,9 @@ def render_auth():
 
         tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
 
-        # -------------------- Login --------------------
-
         with tab_login:
             with st.form("login_form"):
-                email = st.text_input(
-                    "Email",
-                    key="login_email"
-                )
+                email = st.text_input("Email", key="login_email")
 
                 password = st.text_input(
                     "Password",
@@ -303,7 +346,6 @@ def render_auth():
             if submitted:
                 if not email or not password:
                     st.error("Please enter both email and password.")
-
                 else:
                     status, data = api_call(
                         "POST",
@@ -319,25 +361,13 @@ def render_auth():
                         refresh_watchlist()
                         st.success("Login successful.")
                         st.rerun()
-
                     else:
-                        st.error(
-                            data.get("error", "Login failed.")
-                        )
-
-        # -------------------- Signup --------------------
+                        st.error(data.get("error", "Login failed."))
 
         with tab_signup:
             with st.form("signup_form"):
-                name = st.text_input(
-                    "Full name",
-                    key="signup_name"
-                )
-
-                email_s = st.text_input(
-                    "Email",
-                    key="signup_email"
-                )
+                name = st.text_input("Full name", key="signup_name")
+                email_s = st.text_input("Email", key="signup_email")
 
                 password_s = st.text_input(
                     "Password",
@@ -359,15 +389,10 @@ def render_auth():
             if submitted_s:
                 if not name or not email_s or not password_s or not confirm_s:
                     st.error("Please fill in every field.")
-
                 elif password_s != confirm_s:
                     st.error("Passwords do not match.")
-
                 elif len(password_s) < 8:
-                    st.error(
-                        "Password must be at least 8 characters long."
-                    )
-
+                    st.error("Password must be at least 8 characters long.")
                 else:
                     status, data = api_call(
                         "POST",
@@ -390,6 +415,35 @@ def render_auth():
 
 
 # ---------------------------------------------------------------------------
+# Watchlist action helper
+# ---------------------------------------------------------------------------
+
+def toggle_watchlist(movie_id, in_watchlist, key):
+    user_id = st.session_state.user["id"]
+
+    if in_watchlist:
+        status, data = api_call(
+            "DELETE",
+            f"/api/watchlist/{user_id}/{movie_id}"
+        )
+    else:
+        status, data = api_call(
+            "POST",
+            "/api/watchlist",
+            json={
+                "user_id": user_id,
+                "movie_id": movie_id
+            }
+        )
+
+    if status in (200, 201):
+        refresh_watchlist()
+        st.rerun()
+    else:
+        st.error(data.get("error", "Something went wrong."))
+
+
+# ---------------------------------------------------------------------------
 # Movie cards
 # ---------------------------------------------------------------------------
 
@@ -406,12 +460,8 @@ def render_movie_card(movie, in_watchlist, key_prefix):
     poster_url = movie.get("poster_url")
 
     with st.container():
-        # Poster image - fixed width
         if poster_url:
-            st.image(
-                poster_url,
-                width=180
-            )
+            st.image(poster_url, width=180)
         else:
             st.markdown(
                 '<div class="sf-card" '
@@ -422,7 +472,6 @@ def render_movie_card(movie, in_watchlist, key_prefix):
                 unsafe_allow_html=True
             )
 
-        # Movie information
         st.markdown(
             f"""
             <div class="sf-card">
@@ -434,7 +483,14 @@ def render_movie_card(movie, in_watchlist, key_prefix):
             unsafe_allow_html=True
         )
 
-        # Watchlist button
+        if st.button(
+            "View Details",
+            key=f"details_{key_prefix}_{movie_id}",
+            use_container_width=True
+        ):
+            st.session_state.selected_movie = movie
+            st.rerun()
+
         btn_label = (
             "− Remove from Watchlist"
             if in_watchlist
@@ -446,31 +502,304 @@ def render_movie_card(movie, in_watchlist, key_prefix):
             key=f"{key_prefix}_{movie_id}",
             use_container_width=True
         ):
-            user_id = st.session_state.user["id"]
+            toggle_watchlist(
+                movie_id,
+                in_watchlist,
+                key=f"{key_prefix}_{movie_id}"
+            )
 
-            if in_watchlist:
-                status, data = api_call(
+
+# ---------------------------------------------------------------------------
+# Ratings & Reviews
+# ---------------------------------------------------------------------------
+
+def render_reviews(movie_id):
+    st.markdown("## ⭐ Ratings & Reviews")
+
+    status, data = fetch_reviews(movie_id)
+
+    if status is None:
+        st.error(data.get("error", "Could not load reviews."))
+        return
+
+    if status != 200:
+        st.error(data.get("error", "Could not load reviews."))
+        return
+
+    average_rating = data.get("average_rating", 0)
+    total_reviews = data.get("total_reviews", 0)
+    reviews = data.get("reviews", [])
+
+    # Average rating summary
+    summary_col1, summary_col2 = st.columns([1, 3])
+
+    with summary_col1:
+        st.markdown(
+            f"""
+            <div class="sf-card" style="text-align:center;">
+                <div class="sf-rating" style="font-size:2rem;">
+                    ⭐ {average_rating:.1f}
+                </div>
+                <div class="sf-desc">Average Rating</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with summary_col2:
+        st.markdown(
+            f"""
+            <div class="sf-card">
+                <h3>{total_reviews} Review(s)</h3>
+                <div class="sf-desc">
+                    Ratings and feedback from the StreamFlix community.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    # Find current user's review, if any
+    user = st.session_state.user
+    user_review = None
+
+    if user:
+        for review in reviews:
+            if review.get("user_id") == user["id"]:
+                user_review = review
+                break
+
+    # Review submission / editing form
+    if user:
+        st.markdown("### ✍️ Write Your Review")
+
+        if user_review:
+            st.info("You've already reviewed this movie. You can update your review below.")
+
+        with st.form(f"review_form_{movie_id}"):
+            default_rating = (
+                user_review["rating"]
+                if user_review
+                else 5
+            )
+
+            rating = st.select_slider(
+                "Your Rating",
+                options=[1, 2, 3, 4, 5],
+                value=default_rating,
+                format_func=lambda value: (
+                    f"{'★' * value}{'☆' * (5 - value)}  ({value}/5)"
+                )
+            )
+
+            review_text = st.text_area(
+                "Your Review",
+                value=(
+                    user_review.get("review_text", "")
+                    if user_review
+                    else ""
+                ),
+                placeholder="Share your thoughts about this movie...",
+                max_chars=2000,
+                height=150
+            )
+
+            submitted = st.form_submit_button(
+                "Update Review" if user_review else "Submit Review",
+                use_container_width=True
+            )
+
+        if submitted:
+            if not review_text.strip():
+                st.warning("Please write something before submitting.")
+            else:
+                if user_review:
+                    status, result = api_call(
+                        "PUT",
+                        f"/api/reviews/{user_review['id']}",
+                        json={
+                            "user_id": user["id"],
+                            "rating": rating,
+                            "review_text": review_text.strip()
+                        }
+                    )
+                else:
+                    status, result = api_call(
+                        "POST",
+                        "/api/reviews",
+                        json={
+                            "user_id": user["id"],
+                            "movie_id": movie_id,
+                            "rating": rating,
+                            "review_text": review_text.strip()
+                        }
+                    )
+
+                if status in (200, 201):
+                    st.success(
+                        result.get("message", "Review saved successfully!")
+                    )
+                    st.rerun()
+                else:
+                    st.error(
+                        result.get("error", "Could not save your review.")
+                    )
+    else:
+        st.info("Log in to rate this movie and write a review.")
+
+    # Display all reviews
+    st.markdown("### 💬 Community Reviews")
+
+    if not reviews:
+        st.markdown(
+            '<p class="sf-empty">'
+            'No reviews yet. Be the first to share your thoughts!'
+            '</p>',
+            unsafe_allow_html=True
+        )
+        return
+
+    for review in reviews:
+        reviewer = html.escape(
+            str(review.get("user_name", "Anonymous"))
+        )
+
+        review_content = html.escape(
+            str(review.get("review_text", ""))
+        )
+
+        rating = review.get("rating", 0)
+
+        raw_date = review.get("created_at", "")
+        try:
+            date_display = datetime.fromisoformat(
+                raw_date.replace("Z", "+00:00")
+            ).strftime("%d %b %Y")
+        except (ValueError, TypeError, AttributeError):
+            date_display = "Recently"
+
+        st.markdown(
+            f"""
+            <div class="sf-review">
+                <div class="sf-review-name">{reviewer}</div>
+                <div class="sf-review-date">{date_display}</div>
+                <div class="sf-rating" style="margin-top:8px;">
+                    {star_text(rating)}
+                    <span style="color:#b7b7c4;font-size:0.85rem;">
+                        {rating}/5
+                    </span>
+                </div>
+                <div class="sf-review-text">{review_content}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # Delete button only for the current user's review
+        if user and review.get("user_id") == user["id"]:
+            if st.button(
+                "🗑️ Delete My Review",
+                key=f"delete_review_{review['id']}"
+            ):
+                status, result = api_call(
                     "DELETE",
-                    f"/api/watchlist/{user_id}/{movie_id}"
-                )
-            else:
-                status, data = api_call(
-                    "POST",
-                    "/api/watchlist",
-                    json={
-                        "user_id": user_id,
-                        "movie_id": movie_id
-                    }
+                    f"/api/reviews/{review['id']}",
+                    json={"user_id": user["id"]}
                 )
 
-            if status in (200, 201):
-                refresh_watchlist()
-                st.rerun()
+                if status == 200:
+                    st.success("Review deleted successfully.")
+                    st.rerun()
+                else:
+                    st.error(
+                        result.get("error", "Could not delete review.")
+                    )
 
-            else:
-                st.error(
-                    data.get("error", "Something went wrong.")
-                )
+
+# ---------------------------------------------------------------------------
+# Movie Details Screen
+# ---------------------------------------------------------------------------
+
+def render_movie_details(movie):
+    movie_id = movie["id"]
+
+    title = html.escape(str(movie.get("title", "Untitled")))
+    genre = html.escape(str(movie.get("genre", "Unknown")))
+    year = html.escape(str(movie.get("year", "N/A")))
+    description = html.escape(
+        str(movie.get("description", "No description available."))
+    )
+
+    poster_url = movie.get("poster_url")
+    in_watchlist = movie_id in st.session_state.watchlist_ids
+
+    if st.button("← Back to Browse", key="back_to_browse"):
+        st.session_state.selected_movie = None
+        st.rerun()
+
+    st.write("")
+    st.markdown("---")
+
+    poster_col, details_col = st.columns([1, 2], gap="large")
+
+    with poster_col:
+        if poster_url:
+            st.image(poster_url, width=320)
+        else:
+            st.markdown(
+                '<div class="sf-card" '
+                'style="text-align:center; padding:80px 10px;">'
+                '<div style="font-size:4rem;">🎬</div>'
+                '<div class="sf-desc">Poster unavailable</div>'
+                '</div>',
+                unsafe_allow_html=True
+            )
+
+    with details_col:
+        st.markdown(
+            f"""
+            <div class="sf-logo" style="font-size:1rem;">
+                STREAMFLIX ORIGINAL DISCOVERY
+            </div>
+            <h1 style="color:white; margin-top:12px;">
+                {title}
+            </h1>
+            <div class="sf-meta" style="font-size:1rem;">
+                {genre} &nbsp; · &nbsp; {year}
+            </div>
+            <div class="sf-card" style="margin-top:20px;">
+                <h3>About this title</h3>
+                <p class="sf-desc" style="font-size:1rem;">
+                    {description}
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.write("")
+
+        btn_label = (
+            "− Remove from Watchlist"
+            if in_watchlist
+            else "+ Add to Watchlist"
+        )
+
+        if st.button(
+            btn_label,
+            key=f"details_watchlist_{movie_id}",
+            use_container_width=True
+        ):
+            toggle_watchlist(
+                movie_id,
+                in_watchlist,
+                key=f"details_watchlist_{movie_id}"
+            )
+
+    st.markdown("---")
+
+    # Ratings & Reviews section
+    render_reviews(movie_id)
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +808,10 @@ def render_movie_card(movie, in_watchlist, key_prefix):
 
 def render_dashboard():
     user = st.session_state.user
+
+    if st.session_state.selected_movie is not None:
+        render_movie_details(st.session_state.selected_movie)
+        return
 
     first_name = html.escape(
         user.get("name", "User").split(" ")[0]
@@ -524,7 +857,6 @@ def render_dashboard():
         )
 
     else:
-        # Five-column watchlist layout
         cols = st.columns(5)
 
         for i, movie in enumerate(watchlist):
@@ -565,7 +897,6 @@ def render_dashboard():
             key="genre_filter"
         )
 
-    # Build API query parameters
     params = {}
 
     if query.strip():
@@ -603,7 +934,6 @@ def render_dashboard():
 
     st.caption(f"{len(movies)} title(s) found")
 
-    # Five-column movie layout
     cols = st.columns(5)
 
     for i, movie in enumerate(movies):
